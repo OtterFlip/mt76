@@ -635,6 +635,7 @@ mt7915_mcu_bss_bmc_tlv(struct sk_buff *skb, struct mt7915_phy *phy)
 	struct bss_info_bmc_rate *bmc;
 	struct cfg80211_chan_def *chandef = &phy->mt76->chandef;
 	enum nl80211_band band = chandef->chan->band;
+	struct mt7915_dev *dev = phy->dev;
 	struct tlv *tlv;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, BSS_INFO_BMC_RATE, sizeof(*bmc));
@@ -646,6 +647,10 @@ mt7915_mcu_bss_bmc_tlv(struct sk_buff *skb, struct mt7915_phy *phy)
 		bmc->bc_trans = cpu_to_le16(0x2000);
 		bmc->mc_trans = cpu_to_le16(0x2080);
 	}
+	/* NATE trace: log BMC rate config chosen for this BSS */
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: bmc band=%u bc=0x%04x mc=0x%04x\n",
+		 band, le16_to_cpu(bmc->bc_trans), le16_to_cpu(bmc->mc_trans));
 }
 
 static int
@@ -693,6 +698,13 @@ int mt7915_mcu_add_bss_info(struct mt7915_phy *phy,
 	struct mt7915_dev *dev = phy->dev;
 	struct sk_buff *skb;
 
+	/* Multi-SSID notes:
+	 * - The primary, transmitted BSSID uses HW_BSSID_0..3 (typically 0).
+	 * - Extended BSSIDs (non-transmitted) use EXT_BSSID_1..15 (1-based).
+	 * - Firmware expects ext-BSS TSF offsets in slot units where slot 0
+	 *   is the transmitted BSSID; hence we derive a 1-based ext_bss_idx
+	 *   by subtracting EXT_BSSID_START from the OMAC index.
+	 */
 	if (mvif->mt76.omac_idx >= REPEATER_BSSID_START) {
 		mt7915_mcu_muar_config(phy, vif, false, enable);
 		mt7915_mcu_muar_config(phy, vif, true, enable);
@@ -706,6 +718,14 @@ int mt7915_mcu_add_bss_info(struct mt7915_phy *phy,
 	/* bss_omac must be first */
 	if (enable)
 		mt76_connac_mcu_bss_omac_tlv(skb, vif);
+	if (enable) {
+		u8 hw_bss_idx = mvif->mt76.omac_idx > EXT_BSSID_START ?
+				HW_BSSID_0 : mvif->mt76.omac_idx;
+		dev_info(dev->mt76.dev,
+			 "NATE mbssid: bss_omac omac_idx=0x%x hw_bss_idx=%u band=%u\n",
+			 mvif->mt76.omac_idx, hw_bss_idx,
+			 phy->mt76->band_idx);
+	}
 
 	mt76_connac_mcu_bss_basic_tlv(skb, vif, NULL, phy->mt76,
 				      mvif->sta.wcid.idx, enable);
@@ -724,7 +744,13 @@ int mt7915_mcu_add_bss_info(struct mt7915_phy *phy,
 
 		if (mvif->mt76.omac_idx >= EXT_BSSID_START &&
 		    mvif->mt76.omac_idx < REPEATER_BSSID_START)
+		{
+			int ext_bss_idx = mvif->mt76.omac_idx - EXT_BSSID_START;
+			dev_info(dev->mt76.dev,
+				 "NATE mbssid: bss_info ext omac_idx=0x%x ext_bss_idx=%d (slot units)\n",
+				 mvif->mt76.omac_idx, ext_bss_idx);
 			mt76_connac_mcu_bss_ext_tlv(skb, &mvif->mt76);
+		}
 	}
 out:
 	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
@@ -1715,12 +1741,24 @@ int __mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
 	struct mt7915_sta *msta;
 	struct sk_buff *skb;
 	int ret;
+	u8 hw_bss_idx;
 
 	msta = sta ? (struct mt7915_sta *)sta->drv_priv : &mvif->sta;
 	link_sta = sta ? &sta->deflink : NULL;
 
 	if (!wcid)
 		wcid = &msta->wcid;
+
+	hw_bss_idx = mvif->mt76.omac_idx > HW_BSSID_MAX ?
+		     HW_BSSID_0 : mvif->mt76.omac_idx;
+	/* NATE trace: log STA add/update context */
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: sta_add omac_idx=0x%x hw_bss_idx=%u band=%u wmm=%u state=%d new=%d wcid=%u vif_bssid=%pM\n",
+		 mvif->mt76.omac_idx, hw_bss_idx, mvif->mt76.band_idx,
+		 mvif->mt76.wmm_idx, conn_state, newly, wcid->idx, vif->addr);
+	if (sta)
+		dev_info(dev->mt76.dev,
+			 "NATE mbssid: sta_add peer=%pM\n", sta->addr);
 
 	skb = mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->mt76, wcid);
 	if (IS_ERR(skb))
@@ -1862,6 +1900,13 @@ mt7915_mcu_beacon_mbss(struct sk_buff *rskb, struct sk_buff *skb,
 		       struct ieee80211_vif *vif, struct bss_info_bcn *bcn,
 		       struct ieee80211_mutable_offsets *offs)
 {
+	/* Multi-BSSID beacon construction:
+	 * - The transmitted (primary) BSSID is at bssid_index 0 and uses
+	 *   offs->tim_offset as its template anchor.
+	 * - Non-transmitted BSS profiles carry WLAN_EID_MULTI_BSSID_IDX with
+	 *   bssid_index 1..N and their offsets are recorded into the TLV.
+	 * - This matches the 1-based EXT_BSSID_* convention used elsewhere.
+	 */
 	struct bss_info_bcn_mbss *mbss;
 	const struct element *elem;
 	struct tlv *tlv;
@@ -2078,6 +2123,10 @@ int mt7915_mcu_add_beacon(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	mt7915_mcu_beacon_cntdwn(vif, rskb, skb, bcn, &offs);
 	mt7915_mcu_beacon_mbss(rskb, skb, vif, bcn, &offs);
+	/* mbssid: trace when MBSSID offsets are embedded into the beacon */
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: beacon mbssid indicator=%u mbssid_off=%u len=%u\n",
+		 vif->bss_conf.bssid_indicator, offs.mbssid_off, skb->len);
 	mt7915_mcu_beacon_cont(dev, vif, rskb, skb, bcn, &offs);
 	dev_kfree_skb(skb);
 

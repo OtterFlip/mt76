@@ -231,6 +231,17 @@ static int mt7915_add_interface(struct ieee80211_hw *hw,
 		goto out;
 	}
 	mvif->mt76.omac_idx = idx;
+	/* mbssid: trace OMAC selection and masks to debug multi-SSID setup.
+	 * - OMAC indices:
+	 *   HW_BSSID_0..3 are primary hardware BSSID slots.
+	 *   EXT_BSSID_1..15 are extended BSSID slots (1-based).
+	 * - For AP mode, we prefer HW_BSSID_0, then EXT_BSSID_*.
+	 */
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: add_if type=%d omac_idx=0x%x vif_idx=%u omac_mask=0x%llx vif_mask=0x%llx\n",
+		 vif->type, mvif->mt76.omac_idx, mvif->mt76.idx,
+		 (unsigned long long)phy->omac_mask,
+		 (unsigned long long)dev->mt76.vif_mask);
 	mvif->phy = phy;
 	mvif->mt76.band_idx = phy->mt76->band_idx;
 	mvif->mt76.wcid = &mvif->sta.wcid;
@@ -291,6 +302,12 @@ static void mt7915_remove_interface(struct ieee80211_hw *hw,
 	struct mt7915_dev *dev = mt7915_hw_dev(hw);
 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
 	int idx = msta->wcid.idx;
+
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: rem_if type=%d omac_idx=0x%x vif_idx=%u omac_mask=0x%llx vif_mask=0x%llx\n",
+		 vif->type, mvif->mt76.omac_idx, mvif->mt76.idx,
+		 (unsigned long long)phy->omac_mask,
+		 (unsigned long long)dev->mt76.vif_mask);
 
 	mt7915_mcu_add_bss_info(phy, vif, false);
 	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
@@ -418,6 +435,13 @@ static int mt7915_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 	}
 
 	mt76_wcid_key_setup(&dev->mt76, wcid, key);
+	/* key programming trace: AP-mode problems often stem from keys bound
+	 * to the wrong WCID/HW-BSS. Log the essential context.
+	 */
+	dev_info(dev->mt76.dev,
+		 "NATE mbssid: set_key cmd=%d vif_type=%d omac_idx=0x%x wcid=%u keyidx=%d pairwise=%d cipher=0x%x\n",
+		 cmd, vif->type, mvif->mt76.omac_idx, wcid->idx, idx,
+		 !!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE), key->cipher);
 	err = mt76_connac_mcu_add_key(&dev->mt76, vif, &msta->bip,
 				      key, MCU_EXT_CMD(STA_REC_UPDATE),
 				      &msta->wcid, cmd);
@@ -609,6 +633,7 @@ static void mt7915_bss_info_changed(struct ieee80211_hw *hw,
 {
 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
 	struct mt7915_dev *dev = mt7915_hw_dev(hw);
+	struct mt7915_vif *mvif = (struct mt7915_vif *)vif->drv_priv;
 	int set_bss_info = -1, set_sta = -1;
 
 	mutex_lock(&dev->mt76.mutex);
@@ -631,6 +656,11 @@ static void mt7915_bss_info_changed(struct ieee80211_hw *hw,
 		mt7915_mcu_add_bss_info(phy, vif, true);
 	if (set_sta == 1)
 		mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_PORT_SECURE, false);
+	if (set_bss_info == 1 || set_sta == 1)
+		dev_info(dev->mt76.dev,
+			 "NATE mbssid: bss_info_changed enable set_bss=%d set_sta=%d type=%d omac_idx=0x%x changed=0x%llx\n",
+			 set_bss_info, set_sta, vif->type, mvif->mt76.omac_idx,
+			 (unsigned long long)changed);
 
 	if (changed & BSS_CHANGED_ERP_CTS_PROT)
 		mt7915_mac_enable_rtscts(dev, vif, info->use_cts_prot);
@@ -670,6 +700,11 @@ static void mt7915_bss_info_changed(struct ieee80211_hw *hw,
 		mt7915_mcu_add_bss_info(phy, vif, false);
 	if (set_sta == 0)
 		mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
+	if (set_bss_info == 0 || set_sta == 0)
+		dev_info(dev->mt76.dev,
+			 "NATE mbssid: bss_info_changed disable set_bss=%d set_sta=%d type=%d omac_idx=0x%x changed=0x%llx\n",
+			 set_bss_info, set_sta, vif->type, mvif->mt76.omac_idx,
+			 (unsigned long long)changed);
 
 	mutex_unlock(&dev->mt76.mutex);
 }

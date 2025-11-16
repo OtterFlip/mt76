@@ -363,6 +363,15 @@ void mt76_connac_mcu_bss_omac_tlv(struct sk_buff *skb,
 	omac->conn_type = cpu_to_le32(type);
 	omac->omac_idx = mvif->omac_idx;
 	omac->band_idx = mvif->band_idx;
+	/* For extended BSSIDs (EXT_BSSID_*), firmware uses the primary
+	 * HW_BSSID_0 context. Map any EXT_BSSID_* to HW_BSSID_0 here.
+	 */
+	/* NATE trace: log OMAC HW_BSSID mapping at BSS OMAC TLV time */
+	{
+		u8 _idx = omac_idx > EXT_BSSID_START ? HW_BSSID_0 : omac_idx;
+		pr_info("NATE mbssid: bss_omac omac_idx=0x%x hw_bss_idx=%u band=%u\n",
+			omac_idx, _idx, mvif->band_idx);
+	}
 	omac->hw_bss_idx = omac_idx > EXT_BSSID_START ? HW_BSSID_0 : omac_idx;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_bss_omac_tlv);
@@ -1218,6 +1227,14 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 
 	idx = mvif->omac_idx > EXT_BSSID_START ? HW_BSSID_0 : mvif->omac_idx;
 	basic_req.basic.hw_bss_idx = idx;
+	/* mbssid: log hw_bss mapping chosen for this OMAC in UNI basic path */
+	dev_info(dev->dev,
+		 "NATE mbssid: uni_basic enable=%d omac_idx=0x%x hw_bss_idx=%u wmm=%u\n",
+		 enable, mvif->omac_idx, idx, mvif->wmm_idx);
+	/* mbssid: log hw_bss mapping chosen for this OMAC in UNI add_dev path */
+	dev_info(dev->dev,
+		 "NATE mbssid: uni_add_dev enable=%d omac_idx=0x%x hw_bss_idx=%u wmm=%u link=%u\n",
+		 enable, mvif->omac_idx, idx, mvif->wmm_idx, mvif->link_idx);
 
 	memcpy(dev_req.tlv.omac_addr, bss_conf->addr, ETH_ALEN);
 
@@ -2759,6 +2776,14 @@ int mt76_connac_mcu_add_key(struct mt76_dev *dev, struct ieee80211_vif *vif,
 	struct sk_buff *skb;
 	int ret;
 
+	/* Trace key programming at MCU level to verify per-BSS state */
+	dev_info(dev->dev,
+		 "NATE mbssid: mcu_add_key cmd=%d vif_type=%d omac_idx=0x%x wcid=%u keyidx=%d pairwise=%d cipher=0x%x\n",
+		 cmd, vif->type, mvif->omac_idx, wcid ? wcid->idx : 0xffff,
+		 key ? key->keyidx : -1,
+		 key ? !!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) : -1,
+		 key ? key->cipher : -1);
+
 	skb = mt76_connac_mcu_alloc_sta_req(dev, mvif, wcid);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
@@ -2783,6 +2808,11 @@ void mt76_connac_mcu_bss_ext_tlv(struct sk_buff *skb, struct mt76_vif_link *mvif
 	int ext_bss_idx, tsf_offset;
 	struct tlv *tlv;
 
+	/* Extended-BSSID TSF offset mapping:
+	 * - OMAC indices for extended BSSIDs start at EXT_BSSID_1 (0x11).
+	 * - ext_bss_idx is 1-based in slot units (slot 0 = transmitted BSSID).
+	 * - Firmware expects mbss_tsf_offset = ext_bss_idx * BCN_TX_ESTIMATE_TIME.
+	 */
 	ext_bss_idx = mvif->omac_idx - EXT_BSSID_START;
 	if (ext_bss_idx < 0)
 		return;
@@ -2855,6 +2885,14 @@ int mt76_connac_mcu_bss_basic_tlv(struct sk_buff *skb,
 	bss->wmm_idx = mvif->wmm_idx;
 	bss->active = enable;
 	bss->cipher = mvif->cipher;
+	/* NATE trace: log BSS basic (BMC) context */
+	{
+		struct mt76_dev *mdev = phy->dev;
+		u16 bmc = ((u16)bss->bmc_wcid_hi << 8) | bss->bmc_wcid_lo;
+		dev_info(mdev->dev,
+			 "NATE mbssid: bss_basic omac_idx=0x%x active=%d wmm=%u bmc_wcid=%u cipher=0x%x\n",
+			 mvif->omac_idx, enable, mvif->wmm_idx, bmc, mvif->cipher);
+	}
 
 	if (vif->type != NL80211_IFTYPE_MONITOR) {
 		struct cfg80211_chan_def *chandef = &phy->chandef;
